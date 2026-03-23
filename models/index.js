@@ -32,6 +32,8 @@ const Return = require('./Return');
 const VatCode = require('./VatCode');
 const Inventory = require('./Inventory');
 const InventoryLog = require('./InventoryLog');
+const SupplierProduct = require('./SupplierProduct');
+
 
 // Company
 Company.hasMany(User, { foreignKey: 'companyId' });
@@ -56,6 +58,8 @@ Company.hasMany(Customer, { foreignKey: 'companyId' });
 Customer.belongsTo(Company, { foreignKey: 'companyId' });
 Company.hasMany(Supplier, { foreignKey: 'companyId' });
 Supplier.belongsTo(Company, { foreignKey: 'companyId' });
+SupplierProduct.belongsTo(Company, { foreignKey: 'companyId' });
+Company.hasMany(SupplierProduct, { foreignKey: 'companyId' });
 Company.hasMany(SalesOrder, { foreignKey: 'companyId' });
 SalesOrder.belongsTo(Company, { foreignKey: 'companyId' });
 Company.hasMany(PurchaseOrder, { foreignKey: 'companyId' });
@@ -68,6 +72,12 @@ VatCode.belongsTo(Company, { foreignKey: 'companyId' });
 // Product -> Supplier
 Supplier.hasMany(Product, { foreignKey: 'supplierId' });
 Product.belongsTo(Supplier, { foreignKey: 'supplierId' });
+
+// SupplierProduct mappings
+Supplier.hasMany(SupplierProduct, { foreignKey: 'supplierId', as: 'SupplierProducts' });
+SupplierProduct.belongsTo(Supplier, { foreignKey: 'supplierId' });
+Product.hasMany(SupplierProduct, { foreignKey: 'productId', as: 'SupplierProducts' });
+SupplierProduct.belongsTo(Product, { foreignKey: 'productId' });
 
 // Warehouse -> Zone -> Location
 Zone.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
@@ -107,16 +117,23 @@ Shipment.belongsTo(Company, { foreignKey: 'companyId' });
 Shipment.belongsTo(User, { foreignKey: 'packedBy', as: 'User' });
 User.hasMany(Shipment, { foreignKey: 'packedBy' });
 
-// PurchaseOrder -> PurchaseOrderItem, Supplier
+// PurchaseOrder -> PurchaseOrderItem, Supplier, Warehouse
 PurchaseOrder.belongsTo(Supplier, { foreignKey: 'supplierId' });
 Supplier.hasMany(PurchaseOrder, { foreignKey: 'supplierId' });
+PurchaseOrder.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
+Warehouse.hasMany(PurchaseOrder, { foreignKey: 'warehouseId' });
+PurchaseOrder.belongsTo(Customer, { foreignKey: 'clientId', as: 'Client' });
+Customer.hasMany(PurchaseOrder, { foreignKey: 'clientId' });
 PurchaseOrder.hasMany(PurchaseOrderItem, { foreignKey: 'purchaseOrderId' });
+
 PurchaseOrderItem.belongsTo(PurchaseOrder, { foreignKey: 'purchaseOrderId' });
 PurchaseOrderItem.belongsTo(Product, { foreignKey: 'productId' });
 
 // GoodsReceipt -> GoodsReceiptItem
 GoodsReceipt.belongsTo(PurchaseOrder, { foreignKey: 'purchaseOrderId' });
 PurchaseOrder.hasMany(GoodsReceipt, { foreignKey: 'purchaseOrderId' });
+GoodsReceipt.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
+Warehouse.hasMany(GoodsReceipt, { foreignKey: 'warehouseId' });
 GoodsReceipt.hasMany(GoodsReceiptItem, { foreignKey: 'goodsReceiptId' });
 GoodsReceiptItem.belongsTo(GoodsReceipt, { foreignKey: 'goodsReceiptId' });
 GoodsReceiptItem.belongsTo(Product, { foreignKey: 'productId' });
@@ -126,8 +143,8 @@ Product.hasMany(ProductStock, { foreignKey: 'productId' });
 ProductStock.belongsTo(Product, { foreignKey: 'productId' });
 Warehouse.hasMany(ProductStock, { foreignKey: 'warehouseId' });
 ProductStock.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
-Location.hasMany(ProductStock, { foreignKey: 'locationId' });
 ProductStock.belongsTo(Location, { foreignKey: 'locationId' });
+ProductStock.belongsTo(Customer, { foreignKey: 'clientId', as: 'Client' });
 
 // InventoryAdjustment (createdBy -> User as createdByUser)
 Product.hasMany(InventoryAdjustment, { foreignKey: 'productId' });
@@ -136,6 +153,8 @@ Warehouse.hasMany(InventoryAdjustment, { foreignKey: 'warehouseId' });
 InventoryAdjustment.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
 User.hasMany(InventoryAdjustment, { foreignKey: 'createdBy', as: 'inventoryAdjustmentsCreated' });
 InventoryAdjustment.belongsTo(User, { foreignKey: 'createdBy', as: 'createdByUser' });
+InventoryAdjustment.belongsTo(Location, { foreignKey: 'locationId', as: 'Location' });
+InventoryAdjustment.belongsTo(Customer, { foreignKey: 'clientId', as: 'Client' });
 
 // CycleCount (countedBy -> User as countedByUser)
 Location.hasMany(CycleCount, { foreignKey: 'locationId' });
@@ -153,7 +172,7 @@ Batch.belongsTo(Location, { foreignKey: 'locationId' });
 Supplier.hasMany(Batch, { foreignKey: 'supplierId' });
 Batch.belongsTo(Supplier, { foreignKey: 'supplierId' });
 
-// Movement (fromLocation, toLocation, createdByUser)
+// Movement (fromLocation, toLocation, createdByUser, warehouses)
 Product.hasMany(Movement, { foreignKey: 'productId' });
 Movement.belongsTo(Product, { foreignKey: 'productId' });
 Batch.hasMany(Movement, { foreignKey: 'batchId' });
@@ -162,8 +181,13 @@ Location.hasMany(Movement, { foreignKey: 'fromLocationId', as: 'movementsFrom' }
 Movement.belongsTo(Location, { foreignKey: 'fromLocationId', as: 'fromLocation' });
 Location.hasMany(Movement, { foreignKey: 'toLocationId', as: 'movementsTo' });
 Movement.belongsTo(Location, { foreignKey: 'toLocationId', as: 'toLocation' });
+Warehouse.hasMany(Movement, { foreignKey: 'fromWarehouseId', as: 'movementsFromWh' });
+Movement.belongsTo(Warehouse, { foreignKey: 'fromWarehouseId', as: 'fromWarehouse' });
+Warehouse.hasMany(Movement, { foreignKey: 'toWarehouseId', as: 'movementsToWh' });
+Movement.belongsTo(Warehouse, { foreignKey: 'toWarehouseId', as: 'toWarehouse' });
 User.hasMany(Movement, { foreignKey: 'createdBy', as: 'movementsCreated' });
 Movement.belongsTo(User, { foreignKey: 'createdBy', as: 'createdByUser' });
+
 
 // ReplenishmentTask (fromLocation, toLocation)
 Product.hasMany(ReplenishmentTask, { foreignKey: 'productId' });
@@ -188,6 +212,8 @@ Product.hasMany(InventoryLog, { foreignKey: 'productId' });
 InventoryLog.belongsTo(Product, { foreignKey: 'productId' });
 Warehouse.hasMany(InventoryLog, { foreignKey: 'warehouseId' });
 InventoryLog.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
+InventoryLog.belongsTo(Location, { foreignKey: 'locationId', as: 'Location' });
+InventoryLog.belongsTo(Customer, { foreignKey: 'clientId', as: 'Client' });
 
 // Bundle -> BundleItem
 Bundle.hasMany(BundleItem, { foreignKey: 'bundleId' });
@@ -240,4 +266,5 @@ module.exports = {
   VatCode,
   Inventory,
   InventoryLog,
+  SupplierProduct,
 };

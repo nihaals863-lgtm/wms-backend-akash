@@ -80,7 +80,7 @@ async function update(id, data, reqUser) {
   if (data.deliveryStatus === 'SHIPPED' || data.deliveryStatus === 'IN_TRANSIT') {
     await order.update({ status: 'SHIPPED' });
   } else if (data.deliveryStatus === 'DELIVERED') {
-    await order.update({ status: 'DELIVERED' });
+    await order.update({ status: 'COMPLETED' });
   } else if (data.deliveryStatus === 'FAILED' || data.deliveryStatus === 'RETURNED') {
     await order.update({ status: 'SHIPPED' });
   }

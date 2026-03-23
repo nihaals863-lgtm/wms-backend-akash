@@ -63,4 +63,16 @@ async function remove(req, res, next) {
   }
 }
 
-module.exports = { list, getById, create, update, approve, remove };
+async function generateAsn(req, res, next) {
+  try {
+    const data = await purchaseOrderService.generateAsn(req.params.id, req.body, req.user);
+    res.json({ success: true, data });
+  } catch (err) {
+    if (err.message === 'Purchase order not found') return res.status(404).json({ success: false, message: err.message });
+    if (err.code === 'BAD_REQUEST' || err.message?.includes('Only approved')) return res.status(400).json({ success: false, message: err.message });
+    next(err);
+  }
+}
+
+module.exports = { list, getById, create, update, approve, remove, generateAsn };
+

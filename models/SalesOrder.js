@@ -16,7 +16,7 @@ const SalesOrder = sequelize.define('SalesOrder', {
   status: {
     type: DataTypes.STRING,
     defaultValue: 'DRAFT',
-    validate: { isIn: [['DRAFT', 'CONFIRMED', 'PICKING_IN_PROGRESS', 'PICKED', 'PACKING_IN_PROGRESS', 'PACKED', 'SHIPPED', 'DELIVERED', 'CANCELLED']] },
+    validate: { isIn: [['DRAFT', 'CONFIRMED', 'PICKING_IN_PROGRESS', 'PICKED', 'PACKING_IN_PROGRESS', 'PACKED', 'SHIPPED', 'DELIVERED', 'COMPLETED', 'CANCELLED']] },
   },
   totalAmount: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
   createdBy: { type: DataTypes.INTEGER, allowNull: true },

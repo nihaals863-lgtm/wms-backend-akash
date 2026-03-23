@@ -363,6 +363,16 @@ async function transfer(req, res, next) {
   }
 }
 
+async function transferStock(req, res, next) {
+  try {
+    const data = await inventoryService.transferStock(req.body, req.user);
+    res.json({ success: true, data });
+  } catch (err) {
+    if (err.message.includes('Insufficient stock')) return res.status(400).json({ success: false, message: err.message });
+    next(err);
+  }
+}
+
 module.exports = {
   listProducts,
   getProduct,
@@ -401,4 +411,5 @@ module.exports = {
   stockIn,
   stockOut,
   transfer,
+  transferStock,
 };

@@ -1,4 +1,4 @@
-const { Product, Category, ProductStock, Warehouse, Company, Supplier, InventoryAdjustment, CycleCount, Batch, Movement } = require('../models');
+const { Product, Category, ProductStock, Warehouse, Company, Supplier, InventoryAdjustment, CycleCount, Batch, Movement, Customer, InventoryLog, Inventory } = require('../models');
 const { Op } = require('sequelize');
 
 /** Ensure product JSON fields from API are proper objects/arrays (e.g. SQLite may return strings) */
@@ -532,6 +532,8 @@ async function listAdjustments(reqUser, query = {}) {
       { association: 'Product', attributes: ['id', 'name', 'sku'] },
       { association: 'Warehouse', required: false, attributes: ['id', 'name'] },
       { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
+      { association: 'Location', required: false, attributes: ['id', 'name', 'code'] },
+      { association: 'Client', required: false, attributes: ['id', 'name'] },
     ],
   });
   return list.map((a) => {
@@ -560,37 +562,60 @@ async function createAdjustment(data, reqUser) {
 
   // Auto-detect type from quantity sign if not explicitly provided
   const rawQty = parseInt(data.quantity, 10) || 0;
-  let type;
-  if (data.type && (data.type.toUpperCase() === 'INCREASE' || data.type.toUpperCase() === 'DECREASE')) {
-    type = data.type.toUpperCase();
-  } else {
-    type = rawQty >= 0 ? 'INCREASE' : 'DECREASE';
-  }
+  const type = data.type?.toUpperCase() === 'INCREASE' || (rawQty >= 0 && data.type?.toUpperCase() !== 'DECREASE') ? 'INCREASE' : 'DECREASE';
   const qty = Math.abs(rawQty);
   if (qty < 1) throw new Error('Quantity must be at least 1');
-  const referenceNumber = generateAdjustmentReference();
-  let warehouseId = data.warehouseId || null;
 
-  if (type === 'INCREASE' && warehouseId) {
+  let warehouseId = data.warehouseId || null;
+  let locationId = data.locationId || null;
+  let batchId = data.batchId || null;
+  let batchNumber = data.batchNumber || null;
+  let bestBeforeDate = data.bestBeforeDate || null;
+  let clientId = data.clientId || null;
+
+  // New requirement: Stock updates per SKU + Warehouse + Location + Batch
+  // If batchId is provided, resolve batchNumber
+  if (batchId && !batchNumber) {
+    const b = await Batch.findByPk(batchId);
+    if (b) batchNumber = b.batchNumber;
+  }
+
+  if (!warehouseId) throw new Error('Warehouse is mandatory for inventory booking');
+  if (!locationId) throw new Error('Location is mandatory to ensure stock tracking per bin');
+  if (!clientId) throw new Error('Client is mandatory for stock movement mapping');
+
+  if (type === 'INCREASE') {
     const warehouseService = require('./warehouseService');
     await warehouseService.validateCapacity(warehouseId, qty);
   }
 
-  const stockWhere = { productId: data.productId };
-  if (warehouseId) stockWhere.warehouseId = warehouseId;
+  const referenceNumber = generateAdjustmentReference();
+
+  // Find exact stock record for this combination
+  const stockWhere = { 
+    productId: data.productId,
+    warehouseId: warehouseId,
+    locationId: locationId || null,
+    batchNumber: batchNumber || null
+  };
+
   let stock = await ProductStock.findOne({ where: stockWhere });
-  if (!stock && !warehouseId) {
-    stock = await ProductStock.findOne({ where: { productId: data.productId } });
-    if (stock) warehouseId = stock.warehouseId;
+
+  if (type === 'DECREASE') {
+    if (!stock || (stock.quantity || 0) - (stock.reserved || 0) < qty) {
+      throw new Error('Insufficient available stock for this combination (Warehouse/Location/Batch)');
+    }
   }
-  if (type === 'DECREASE' && (!stock || (stock.quantity || 0) - (stock.reserved || 0) < qty)) {
-    throw new Error('Insufficient available stock for decrease');
-  }
+
   const adjustment = await InventoryAdjustment.create({
     referenceNumber,
     companyId: effectiveCompanyId,
     productId: data.productId,
-    warehouseId: warehouseId || (stock && stock.warehouseId) || null,
+    warehouseId,
+    locationId,
+    batchId,
+    bestBeforeDate,
+    clientId,
     type,
     quantity: qty,
     reason: data.reason || null,
@@ -598,29 +623,57 @@ async function createAdjustment(data, reqUser) {
     status: 'PENDING',
     createdBy: reqUser.id,
   });
+
   if (stock) {
     const newQty = type === 'INCREASE' ? (stock.quantity || 0) + qty : Math.max(0, (stock.quantity || 0) - qty);
-    await stock.update({ quantity: newQty });
+    await stock.update({ 
+      quantity: newQty,
+      bestBeforeDate: bestBeforeDate || stock.bestBeforeDate,
+      clientId: clientId || stock.clientId,
+      userId: reqUser.id,
+      reason: data.reason || stock.reason
+    });
   } else if (type === 'INCREASE') {
-    if (!warehouseId) {
-      const { Warehouse } = require('../models');
-      const firstWarehouse = await Warehouse.findOne({ where: { companyId: effectiveCompanyId } });
-      if (!firstWarehouse) throw new Error('No warehouse found for company');
-      warehouseId = firstWarehouse.id;
-      await ProductStock.create({
-        productId: data.productId,
-        warehouseId,
-        quantity: qty,
-        reserved: 0,
-      });
-    }
+    await ProductStock.create({
+      productId: data.productId,
+      warehouseId,
+      locationId,
+      batchNumber,
+      batchId,
+      quantity: qty,
+      reserved: 0,
+      bestBeforeDate,
+      clientId,
+      userId: reqUser.id,
+      reason: data.reason,
+      status: 'ACTIVE',
+    });
   }
+
+  // Also create a entry in InventoryLog for history
+  const { InventoryLog } = require('../models');
+  await InventoryLog.create({
+    productId: data.productId,
+    warehouseId,
+    locationId,
+    batchId,
+    bestBeforeDate,
+    clientId,
+    userId: reqUser.id,
+    type: type === 'INCREASE' ? 'IN' : 'OUT',
+    quantity: qty,
+    reason: data.reason || (type === 'INCREASE' ? 'Stock In' : 'Stock Out'),
+    referenceId: referenceNumber
+  });
+
   await adjustment.update({ status: 'COMPLETED' });
   return InventoryAdjustment.findByPk(adjustment.id, {
     include: [
       { association: 'Product', attributes: ['id', 'name', 'sku'] },
       { association: 'Warehouse', required: false, attributes: ['id', 'name'] },
       { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
+      { association: 'Location', required: false, attributes: ['id', 'name', 'code'] },
+      { association: 'Client', required: false, attributes: ['id', 'name'] },
     ],
   }).then((a) => {
     const j = a.toJSON();
@@ -967,6 +1020,8 @@ async function listMovements(reqUser, query = {}) {
       { association: 'Batch', required: false, attributes: ['id', 'batchNumber'] },
       { association: 'fromLocation', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
       { association: 'toLocation', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'fromWarehouse', required: false, attributes: ['id', 'name', 'code'] },
+      { association: 'toWarehouse', required: false, attributes: ['id', 'name', 'code'] },
       { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
     ],
   });
@@ -1002,12 +1057,27 @@ async function createMovement(data, reqUser) {
   const transaction = await sequelize.transaction();
 
   try {
+    // Resolve warehouses from locations if provided
+    let fromWarehouseId = data.fromWarehouseId || null;
+    let toWarehouseId = data.toWarehouseId || null;
+
+    if (!fromWarehouseId && data.fromLocationId) {
+      const fl = await (require('../models').Location).findByPk(data.fromLocationId);
+      if (fl) fromWarehouseId = fl.warehouseId;
+    }
+    if (!toWarehouseId && data.toLocationId) {
+      const tl = await (require('../models').Location).findByPk(data.toLocationId);
+      if (tl) toWarehouseId = tl.warehouseId;
+    }
+
     // 1. Log the Movement
     const movement = await Movement.create({
       companyId,
       type,
       productId: data.productId,
       batchId,
+      fromWarehouseId,
+      toWarehouseId,
       fromLocationId: data.fromLocationId || null,
       toLocationId: data.toLocationId || null,
       quantity: qty,
@@ -1115,6 +1185,8 @@ async function getMovementById(id, reqUser) {
       { association: 'Batch', required: false, attributes: ['id', 'batchNumber'] },
       { association: 'fromLocation', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
       { association: 'toLocation', required: false, attributes: ['id', 'name', 'code', 'aisle', 'rack', 'shelf', 'bin'] },
+      { association: 'fromWarehouse', required: false, attributes: ['id', 'name', 'code'] },
+      { association: 'toWarehouse', required: false, attributes: ['id', 'name', 'code'] },
       { association: 'createdByUser', required: false, attributes: ['id', 'name', 'email'] },
     ],
   });
@@ -1179,16 +1251,26 @@ async function listInventory(reqUser, query = {}) {
 }
 
 async function listInventoryLogs(reqUser, query = {}) {
-  const { InventoryLog, Product } = require('../models');
+  const { InventoryLog, Product, Location, Customer } = require('../models');
   const where = {};
   if (query.warehouseId) where.warehouseId = query.warehouseId;
+  if (query.type) where.type = query.type;
+  if (query.productId) where.productId = query.productId;
+  if (query.locationId) where.locationId = query.locationId;
+  if (query.clientId) where.clientId = query.clientId;
+
   const productWhere = {};
   if (reqUser.role !== 'super_admin') productWhere.companyId = reqUser.companyId;
 
   return InventoryLog.findAll({
     where,
-    include: [{ model: Product, where: productWhere, attributes: ['id', 'name', 'sku'] }],
-    order: [['createdAt', 'DESC']]
+    include: [
+      { model: Product, where: productWhere, attributes: ['id', 'name', 'sku'] },
+      { model: Location, required: false, as: 'Location' },
+      { model: Customer, required: false, as: 'Client' },
+    ],
+    order: [['createdAt', 'DESC']],
+    limit: query.limit ? parseInt(query.limit) : 50
   });
 }
 
@@ -1238,6 +1320,105 @@ async function stockOut(data, reqUser) {
 
   return inventory.reload();
 }
+
+async function transferStock(data, reqUser) {
+  const { ProductStock, InventoryLog, sequelize } = require('../models');
+  const { productId, fromLocationId, toLocationId, clientId, quantity, batchNumber, bestBeforeDate, reason } = data;
+  
+  const fromWarehouseId = data.fromWarehouseId || data.warehouseId;
+  const toWarehouseId = data.toWarehouseId || fromWarehouseId;
+
+  if (fromLocationId === toLocationId && fromWarehouseId === toWarehouseId) {
+    throw new Error('Source and destination must be different');
+  }
+
+  const qty = parseInt(quantity);
+  
+  return sequelize.transaction(async (t) => {
+    // 1. Check Source
+    const source = await ProductStock.findOne({
+      where: { 
+        productId, 
+        warehouseId: fromWarehouseId, 
+        locationId: fromLocationId, 
+        batchNumber: batchNumber || null 
+      },
+      transaction: t
+    });
+
+    if (!source || (source.quantity || 0) < qty) {
+      throw new Error('Insufficient stock in source location/warehouse');
+    }
+
+    // 2. Add/Find Destination
+    const [dest, created] = await ProductStock.findOrCreate({
+      where: { 
+        productId, 
+        warehouseId: toWarehouseId, 
+        locationId: toLocationId, 
+        batchNumber: batchNumber || null 
+      },
+      defaults: { 
+        quantity: 0, 
+        reserved: 0, 
+        clientId: clientId || source.clientId, 
+        bestBeforeDate: bestBeforeDate || source.bestBeforeDate,
+        status: 'ACTIVE'
+      },
+      transaction: t
+    });
+
+    // 3. Update Quantities
+    await source.decrement('quantity', { by: qty, transaction: t });
+    await dest.increment('quantity', { by: qty, transaction: t });
+
+    // 4. Create Logs
+    const logBase = {
+      productId,
+      clientId,
+      userId: reqUser.id,
+      batchNumber,
+      bestBeforeDate: bestBeforeDate || source.bestBeforeDate,
+      referenceId: `TRANSFER: ${fromWarehouseId}:${fromLocationId} -> ${toWarehouseId}:${toLocationId}`,
+      reason: reason || 'Internal Transfer'
+    };
+
+    // Source Log (OUT)
+    await InventoryLog.create({
+      ...logBase,
+      warehouseId: fromWarehouseId,
+      locationId: fromLocationId,
+      type: 'TRANSFER',
+      quantity: -qty
+    }, { transaction: t });
+
+    // Destination Log (IN)
+    await InventoryLog.create({
+      ...logBase,
+      warehouseId: toWarehouseId,
+      locationId: toLocationId,
+      type: 'TRANSFER',
+      quantity: qty
+    }, { transaction: t });
+
+    // Create a Movement record for the transfer
+    await Movement.create({
+      companyId: reqUser.companyId,
+      type: 'TRANSFER',
+      productId,
+      fromWarehouseId,
+      toWarehouseId,
+      fromLocationId,
+      toLocationId,
+      quantity: qty,
+      reason: reason || 'Internal Transfer',
+      createdBy: reqUser.id,
+    }, { transaction: t });
+
+    return { success: true };
+  });
+}
+
 
 async function transfer(data, reqUser) {
   const { Inventory, InventoryLog, sequelize } = require('../models');
@@ -1324,4 +1505,5 @@ module.exports = {
   stockIn,
   stockOut,
   transfer,
+  transferStock,
 };

@@ -51,4 +51,25 @@ async function remove(req, res, next) {
   }
 }
 
-module.exports = { list, getById, create, updateReceived, remove };
+async function updateAsnItems(req, res, next) {
+  try {
+    const data = await goodsReceiptService.updateAsnItems(req.params.id, req.body, req.user);
+    res.json({ success: true, data });
+  } catch (err) {
+    if (err.message === 'ASN not found') return res.status(404).json({ success: false, message: err.message });
+    next(err);
+  }
+}
+
+async function finalizeReceiving(req, res, next) {
+  try {
+    const data = await goodsReceiptService.finalizeReceiving(req.params.id, req.user);
+    res.json({ success: true, data });
+  } catch (err) {
+    if (err.message === 'ASN not found') return res.status(404).json({ success: false, message: err.message });
+    if (err.message?.includes('Already finalized')) return res.status(400).json({ success: false, message: err.message });
+    next(err);
+  }
+}
+
+module.exports = { list, getById, create, updateReceived, updateAsnItems, finalizeReceiving, remove };

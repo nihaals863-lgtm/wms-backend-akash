@@ -20,6 +20,7 @@ async function list(reqUser, query = {}) {
   } else {
     return [];
   }
+  if (query.warehouseId) where.warehouseId = query.warehouseId;
   if (query.status) where.status = query.status;
   if (query.search) {
     where[Op.or] = [

@@ -21,7 +21,7 @@ async function getPredictionData(companyId) {
             model: SalesOrder,
             where: {
                 companyId,
-                status: { [Op.in]: ['CONFIRMED', 'PICKING_IN_PROGRESS', 'PICKED', 'PACKING_IN_PROGRESS', 'PACKED', 'SHIPPED', 'DELIVERED'] },
+                status: { [Op.in]: ['CONFIRMED', 'PICKING_IN_PROGRESS', 'PICKED', 'PACKING_IN_PROGRESS', 'PACKED', 'SHIPPED', 'DELIVERED', 'COMPLETED'] },
                 createdAt: { [Op.gte]: startDate }
             },
             attributes: ['createdAt'] // optimization

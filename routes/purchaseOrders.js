@@ -1,15 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const purchaseOrderController = require('../controllers/purchaseOrderController');
-const { authenticate, requireRole } = require('../middlewares/auth');
+const { authenticate, requireRole, requireAdmin, requireStaff, requireClient } = require('../middlewares/auth');
 
 router.use(authenticate);
 
-router.get('/', requireRole('super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager', 'viewer'), purchaseOrderController.list);
-router.get('/:id', requireRole('super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager', 'viewer'), purchaseOrderController.getById);
-router.post('/', requireRole('super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager'), purchaseOrderController.create);
-router.put('/:id', requireRole('super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager'), purchaseOrderController.update);
-router.delete('/:id', requireRole('super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager'), purchaseOrderController.remove);
-router.post('/:id/approve', requireRole('super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager'), purchaseOrderController.approve);
+router.get('/', requireClient, purchaseOrderController.list);
+router.get('/:id', requireClient, purchaseOrderController.getById);
+router.post('/', requireStaff, purchaseOrderController.create);
+router.put('/:id', requireStaff, purchaseOrderController.update);
+router.delete('/:id', requireAdmin, purchaseOrderController.remove);
+router.post('/:id/approve', requireAdmin, purchaseOrderController.approve);
+router.post('/:id/generate-asn', requireStaff, purchaseOrderController.generateAsn);
+
 
 module.exports = router;

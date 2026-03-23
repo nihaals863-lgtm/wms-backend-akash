@@ -13,7 +13,10 @@ const PurchaseOrder = sequelize.define('PurchaseOrder', {
   },
   totalAmount: { type: DataTypes.DECIMAL(12, 2), defaultValue: 0 },
   expectedDelivery: { type: DataTypes.DATE, allowNull: true },
+  warehouseId: { type: DataTypes.INTEGER, allowNull: true },
+  clientId: { type: DataTypes.INTEGER, allowNull: true },
   notes: { type: DataTypes.TEXT, allowNull: true },
+
 }, {
   tableName: 'purchase_orders',
   timestamps: true,

@@ -15,6 +15,7 @@ async function list(reqUser, query = {}) {
     order: [['createdAt', 'DESC']],
     include: [
       { association: 'PurchaseOrder', include: [{ association: 'Supplier', attributes: ['id', 'name'] }] },
+      { association: 'Warehouse', attributes: ['id', 'name', 'code'] },
       { association: 'GoodsReceiptItems', include: [{ association: 'Product', attributes: ['id', 'name', 'sku'] }] },
     ],
   });
@@ -46,6 +47,7 @@ async function getById(id, reqUser) {
   const gr = await GoodsReceipt.findByPk(id, {
     include: [
       { association: 'PurchaseOrder', include: ['Supplier'] },
+      { association: 'Warehouse', attributes: ['id', 'name', 'code'] },
       { association: 'GoodsReceiptItems', include: ['Product'] },
     ],
   });
@@ -81,6 +83,7 @@ async function create(body, reqUser) {
   const gr = await GoodsReceipt.create({
     companyId,
     purchaseOrderId: po.id,
+    warehouseId: po.warehouseId || body.warehouseId || null,
     grNumber,
     status: 'pending',
     notes: body.notes || null,
@@ -151,7 +154,7 @@ async function updateReceived(id, body, reqUser) {
       const qtyToAdd = quality === 'DAMAGED' ? 0 : delta;
       if (qtyToAdd <= 0) continue;
 
-      const whId = defaultWarehouseId; // GRN usually hits default warehouse if not specified
+      const whId = gr.warehouseId || defaultWarehouseId;
       if (whId) {
         await warehouseService.validateCapacity(whId, qtyToAdd);
       }
@@ -159,14 +162,14 @@ async function updateReceived(id, body, reqUser) {
       try {
         // Pehle is product ka koi existing stock record dhoondo (company ke kisi bhi warehouse me) — naya record mat banao jab tak existing na mile
         let stock = await ProductStock.findOne({
-          where: { productId: pid, warehouseId: { [Op.in]: warehouseIds } },
+          where: { productId: pid, warehouseId: whId },
         });
         if (stock) {
           await stock.update({ quantity: (Number(stock.quantity) || 0) + qtyToAdd });
         } else {
           await ProductStock.create({
             productId: pid,
-            warehouseId: defaultWarehouseId,
+            warehouseId: whId,
             quantity: qtyToAdd,
             reserved: 0,
             status: 'ACTIVE',
@@ -184,6 +187,91 @@ async function updateReceived(id, body, reqUser) {
   return { ...plain, stockUpdated: !!stockUpdated, stockWarning: stockWarning || undefined };
 }
 
+async function updateAsnItems(id, body, reqUser) {
+  const gr = await GoodsReceipt.findByPk(id, { include: ['GoodsReceiptItems'] });
+  if (!gr) throw new Error('ASN not found');
+  if (reqUser.role !== 'super_admin' && gr.companyId !== reqUser.companyId) throw new Error('Not authorized');
+
+  if (body.deliveryType) gr.deliveryType = body.deliveryType;
+  if (body.eta) gr.eta = body.eta;
+  if (body.warehouseId) gr.warehouseId = body.warehouseId;
+  await gr.save();
+
+  if (Array.isArray(body.items)) {
+    for (const item of body.items) {
+      const dbItem = gr.GoodsReceiptItems.find(i => i.id === item.id);
+      if (dbItem) {
+        await dbItem.update({
+          batchId: item.batchId || dbItem.batchId,
+          bestBeforeDate: item.bestBeforeDate || dbItem.bestBeforeDate,
+          qtyToBook: item.qtyToBook ?? dbItem.qtyToBook,
+          locationId: item.locationId || dbItem.locationId,
+          qualityStatus: item.qualityStatus || dbItem.qualityStatus
+        });
+      }
+    }
+  }
+
+  return getById(id, reqUser);
+}
+
+async function finalizeReceiving(id, reqUser) {
+  const gr = await GoodsReceipt.findByPk(id, { include: ['GoodsReceiptItems'] });
+  if (!gr) throw new Error('ASN not found');
+  if (reqUser.role !== 'super_admin' && gr.companyId !== reqUser.companyId) throw new Error('Not authorized');
+  if (gr.status === 'completed') throw new Error('Already finalized');
+
+  // Transaction for stock booking
+  const t = await GoodsReceipt.sequelize.transaction();
+  try {
+    for (const item of gr.GoodsReceiptItems) {
+      const qty = Number(item.qtyToBook) || 0;
+      if (qty <= 0) continue;
+
+      if (!gr.warehouseId) throw new Error('Warehouse not specified for this ASN');
+
+      // Add to ProductStock
+      let stock = await ProductStock.findOne({
+        where: { 
+          productId: item.productId, 
+          warehouseId: gr.warehouseId,
+          companyId: gr.companyId,
+          locationId: item.locationId || null
+        },
+        transaction: t
+      });
+
+      if (stock) {
+        await stock.update({ quantity: (Number(stock.quantity) || 0) + qty }, { transaction: t });
+      } else {
+        await ProductStock.create({
+          companyId: gr.companyId,
+          productId: item.productId,
+          warehouseId: gr.warehouseId,
+          locationId: item.locationId || null,
+          quantity: qty,
+          reserved: 0,
+          status: 'ACTIVE'
+        }, { transaction: t });
+      }
+      
+      // Update item received qty
+      await item.update({ receivedQty: qty }, { transaction: t });
+    }
+
+    await gr.update({ 
+      status: 'completed',
+      totalReceived: (gr.GoodsReceiptItems || []).reduce((s, i) => s + (Number(i.qtyToBook) || 0), 0)
+    }, { transaction: t });
+
+    await t.commit();
+    return getById(id, reqUser);
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+}
+
 async function remove(id, reqUser) {
   const gr = await GoodsReceipt.findByPk(id);
   if (!gr) throw new Error('Goods receipt not found');
@@ -193,4 +281,4 @@ async function remove(id, reqUser) {
   return { deleted: true };
 }
 
-module.exports = { list, getById, create, updateReceived, remove };
+module.exports = { list, getById, create, updateReceived, updateAsnItems, finalizeReceiving, remove };

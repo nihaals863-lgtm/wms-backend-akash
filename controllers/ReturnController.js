@@ -14,7 +14,7 @@ exports.createRMA = async (req, res) => {
         if (!order) throw new Error('Sales Order not found');
         const companyId = order.companyId;
         const deliveryStatus = (order.Shipment?.deliveryStatus || '').toUpperCase();
-        const allowedForRMA = ['DELIVERED', 'SHIPPED', 'IN_TRANSIT'].includes(deliveryStatus) || order.status === 'DELIVERED';
+        const allowedForRMA = ['DELIVERED', 'SHIPPED', 'IN_TRANSIT', 'COMPLETED'].includes(deliveryStatus) || ['DELIVERED', 'COMPLETED'].includes(order.status);
         if (!allowedForRMA) throw new Error('RMA can only be created for shipped/delivered orders');
 
         // 2. Resolve Shipment (use provided id or order's shipment)

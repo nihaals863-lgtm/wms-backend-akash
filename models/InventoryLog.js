@@ -12,6 +12,12 @@ const InventoryLog = sequelize.define('InventoryLog', {
   },
   quantity: { type: DataTypes.INTEGER, allowNull: false },
   referenceId: { type: DataTypes.STRING, allowNull: true },
+  locationId: { type: DataTypes.INTEGER, allowNull: true },
+  batchId: { type: DataTypes.INTEGER, allowNull: true },
+  bestBeforeDate: { type: DataTypes.DATEONLY, allowNull: true },
+  userId: { type: DataTypes.INTEGER, allowNull: true },
+  reason: { type: DataTypes.STRING, allowNull: true },
+  clientId: { type: DataTypes.INTEGER, allowNull: true },
 }, {
   tableName: 'inventory_logs',
   timestamps: true,

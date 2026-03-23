@@ -9,7 +9,7 @@ const purchaseOrderController = require('./controllers/purchaseOrderController')
 const goodsReceiptController = require('./controllers/goodsReceiptController');
 const orderController = require('./controllers/orderController');
 const inventoryController = require('./controllers/inventoryController');
-const { authenticate, requireSuperAdmin, requireRole } = require('./middlewares/auth');
+const { authenticate, requireSuperAdmin, requireRole, requireAdmin, requireStaff, requireClient } = require('./middlewares/auth');
 const dashboardController = require('./controllers/dashboardController');
 const reportController = require('./controllers/reportController');
 const analyticsController = require('./controllers/analyticsController');
@@ -61,21 +61,21 @@ app.get('/api/superadmin/reports', authenticate, requireSuperAdmin, superadminCo
 // Purchase orders - explicit routes so 404 doesn't happen
 const poRoles = ['super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager', 'viewer'];
 const poWriteRoles = ['super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager'];
-app.get('/api/purchase-orders', authenticate, requireRole(...poRoles), purchaseOrderController.list);
-app.get('/api/purchase-orders/:id', authenticate, requireRole(...poRoles), purchaseOrderController.getById);
-app.post('/api/purchase-orders', authenticate, requireRole(...poWriteRoles), purchaseOrderController.create);
-app.put('/api/purchase-orders/:id', authenticate, requireRole(...poWriteRoles), purchaseOrderController.update);
-app.delete('/api/purchase-orders/:id', authenticate, requireRole(...poWriteRoles), purchaseOrderController.remove);
-app.post('/api/purchase-orders/:id/approve', authenticate, requireRole(...poWriteRoles), purchaseOrderController.approve);
+app.get('/api/purchase-orders', authenticate, requireClient, purchaseOrderController.list);
+app.get('/api/purchase-orders/:id', authenticate, requireClient, purchaseOrderController.getById);
+app.post('/api/purchase-orders', authenticate, requireStaff, purchaseOrderController.create);
+app.put('/api/purchase-orders/:id', authenticate, requireStaff, purchaseOrderController.update);
+app.delete('/api/purchase-orders/:id', authenticate, requireAdmin, purchaseOrderController.remove);
+app.post('/api/purchase-orders/:id/approve', authenticate, requireAdmin, purchaseOrderController.approve);
 
-// Goods receiving - explicit routes so 404 doesn't happen
-const grRoles = ['super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager', 'viewer'];
-const grWriteRoles = ['super_admin', 'company_admin', 'warehouse_manager', 'inventory_manager'];
-app.get('/api/goods-receiving', authenticate, requireRole(...grRoles), goodsReceiptController.list);
-app.get('/api/goods-receiving/:id', authenticate, requireRole(...grRoles), goodsReceiptController.getById);
-app.post('/api/goods-receiving', authenticate, requireRole(...grWriteRoles), goodsReceiptController.create);
-app.put('/api/goods-receiving/:id/receive', authenticate, requireRole(...grWriteRoles), goodsReceiptController.updateReceived);
-app.delete('/api/goods-receiving/:id', authenticate, requireRole(...grWriteRoles), goodsReceiptController.remove);
+// Goods receiving - explicit routes
+app.get('/api/goods-receiving', authenticate, requireClient, goodsReceiptController.list);
+app.get('/api/goods-receiving/:id', authenticate, requireClient, goodsReceiptController.getById);
+app.post('/api/goods-receiving', authenticate, requireStaff, goodsReceiptController.create);
+app.put('/api/goods-receiving/:id/receive', authenticate, requireStaff, goodsReceiptController.updateReceived);
+app.put('/api/goods-receiving/:id/asn', authenticate, requireStaff, goodsReceiptController.updateAsnItems);
+app.post('/api/goods-receiving/:id/finalize', authenticate, requireStaff, goodsReceiptController.finalizeReceiving);
+app.delete('/api/goods-receiving/:id', authenticate, requireAdmin, goodsReceiptController.remove);
 
 // Inventory products - explicit DELETE so /api/inventory/products/:id never 404s
 const invProductRoles = ['super_admin', 'company_admin', 'inventory_manager'];
@@ -131,8 +131,46 @@ async function start() {
         }
       }
     }
-    // MySQL: skip alter to avoid "Too many keys" on tables that already have many indexes (e.g. users)
+    // MySQL: skip alter to avoid "Too many keys" error. Manual fix for new columns instead.
+    if (dialect === 'mysql') {
+       const manualCols = [
+         { t: 'inventory_adjustments', c: 'batch_id', type: 'INT' },
+         { t: 'inventory_adjustments', c: 'client_id', type: 'INT' },
+         { t: 'inventory_adjustments', c: 'location_id', type: 'INT' },
+         { t: 'inventory_adjustments', c: 'best_before_date', type: 'DATE' },
+         { t: 'inventory_adjustments', c: 'created_by', type: 'INT' },
+         { t: 'inventory_logs', c: 'batch_id', type: 'INT' },
+         { t: 'inventory_logs', c: 'client_id', type: 'INT' },
+         { t: 'inventory_logs', c: 'location_id', type: 'INT' },
+         { t: 'inventory_logs', c: 'best_before_date', type: 'DATE' },
+         { t: 'inventory_logs', c: 'user_id', type: 'INT' },
+         { t: 'inventory_logs', c: 'reason', type: 'VARCHAR(255)' },
+         { t: 'product_stocks', c: 'batch_id', type: 'INT' },
+         { t: 'product_stocks', c: 'client_id', type: 'INT' },
+         { t: 'product_stocks', c: 'location_id', type: 'INT' },
+         { t: 'product_stocks', c: 'batch_number', type: 'VARCHAR(255)' },
+         { t: 'product_stocks', c: 'reason', type: 'VARCHAR(255)' },
+         { t: 'product_stocks', c: 'best_before_date', type: 'DATE' },
+         { t: 'product_stocks', c: 'user_id', type: 'INT' },
+         { t: 'categories', c: 'company_id', type: 'INT' },
+         { t: 'products', c: 'pack_size', type: 'INT DEFAULT 1' },
+         { t: 'products', c: 'alternative_skus', type: 'LONGTEXT' },
+         { t: 'products', c: 'supplier_products', type: 'LONGTEXT' },
+         { t: 'products', c: 'price_lists', type: 'LONGTEXT' },
+         { t: 'products', c: 'cartons', type: 'LONGTEXT' },
+       ];
+       for (const col of manualCols) {
+         try { 
+           await sequelize.query(`ALTER TABLE ${col.t} ADD COLUMN ${col.c} ${col.type} NULL`); 
+         } catch (err) {
+           if (!err.message.includes('Duplicate column')) {
+             console.warn(`[DB] Column ${col.t}.${col.c} potentially exists or error: ${err.message.slice(0, 60)}`);
+           }
+         }
+       }
+    }
     await sequelize.sync({ alter: dialect === 'sqlite' });
+    console.log('Database synced. (MySQL Manual fixes applied)');
     if (dialect === 'sqlite') {
       await sequelize.query('PRAGMA foreign_keys = ON');
     }

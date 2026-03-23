@@ -47,6 +47,10 @@ const requirePicker = requireRole('picker');
 const requirePacker = requireRole('packer');
 const requireViewer = requireRole('viewer');
 
+const requireAdmin = requireRole('admin', 'company_admin', 'super_admin');
+const requireStaff = requireRole('super_admin', 'company_admin', 'manager', 'warehouse_staff', 'staff', 'admin', 'warehouse_manager', 'inventory_manager', 'picker', 'packer');
+const requireClient = requireRole('super_admin', 'company_admin', 'manager', 'warehouse_manager', 'inventory_manager', 'client_user', 'client', 'admin', 'staff', 'warehouse_staff', 'viewer');
+
 const optionalAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -75,6 +79,9 @@ module.exports = {
   requirePicker,
   requirePacker,
   requireViewer,
+  requireAdmin,
+  requireStaff,
+  requireClient,
   optionalAuth,
   JWT_SECRET,
 };

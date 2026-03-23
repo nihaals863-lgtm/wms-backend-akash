@@ -14,6 +14,8 @@ async function list(reqUser, query = {}) {
     order: [['createdAt', 'DESC']],
     include: [
       { association: 'Supplier', attributes: ['id', 'name', 'code'] },
+      { association: 'Warehouse', attributes: ['id', 'name', 'code'], required: false },
+      { association: 'Client', attributes: ['id', 'name'], required: false },
       { association: 'PurchaseOrderItems', include: [{ association: 'Product', attributes: ['id', 'name', 'sku'] }] },
     ],
   });
@@ -24,6 +26,8 @@ async function getById(id, reqUser) {
   const po = await PurchaseOrder.findByPk(id, {
     include: [
       { association: 'Supplier' },
+      { association: 'Client', attributes: ['id', 'name'] },
+      { association: 'Warehouse', attributes: ['id', 'name', 'code'] },
       { association: 'PurchaseOrderItems', include: ['Product'] },
     ],
   });
@@ -40,8 +44,9 @@ async function create(body, reqUser) {
   const companyId = reqUser.role === 'super_admin' ? (body.companyId || reqUser.companyId) : reqUser.companyId;
   if (!companyId) throw new Error('Company context required');
 
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const count = await PurchaseOrder.count({ where: { companyId } });
-  const poNumber = `PO${String(count + 1).padStart(3, '0')}`;
+  const poNumber = `PO-${dateStr}-${String(count + 1).padStart(3, '0')}`;
 
   const supplier = await Supplier.findByPk(body.supplierId);
   if (!supplier || supplier.companyId !== companyId) throw new Error('Invalid supplier');
@@ -51,10 +56,12 @@ async function create(body, reqUser) {
   const po = await PurchaseOrder.create({
     companyId,
     supplierId: body.supplierId,
+    clientId: body.clientId || null,
     poNumber,
-    status: body.status || 'pending',
+    status: (body.status || 'pending').toLowerCase(),
     totalAmount,
     expectedDelivery: body.expectedDelivery || null,
+    warehouseId: body.warehouseId || null,
     notes: body.notes || null,
   });
 
@@ -64,6 +71,8 @@ async function create(body, reqUser) {
     productName: i.productName || null,
     productSku: i.productSku || null,
     quantity: Number(i.quantity) || 0,
+    supplierQuantity: Number(i.supplierQuantity) || 0,
+    packSize: Number(i.packSize) || 1,
     unitPrice: Number(i.unitPrice) || 0,
     totalPrice: (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0),
   }));
@@ -79,9 +88,11 @@ async function update(id, body, reqUser) {
   if (po.status !== 'pending' && po.status !== 'draft') throw new Error('Only pending/draft PO can be updated');
 
   if (body.supplierId != null) po.supplierId = body.supplierId;
+  if (body.clientId != null) po.clientId = body.clientId;
   if (body.expectedDelivery != null) po.expectedDelivery = body.expectedDelivery;
+  if (body.warehouseId != null) po.warehouseId = body.warehouseId;
   if (body.notes != null) po.notes = body.notes;
-  if (body.status != null) po.status = body.status;
+  if (body.status != null) po.status = (body.status).toLowerCase();
 
   if (Array.isArray(body.items) && body.items.length > 0) {
     await PurchaseOrderItem.destroy({ where: { purchaseOrderId: id } });
@@ -94,6 +105,8 @@ async function update(id, body, reqUser) {
       productName: i.productName || null,
       productSku: i.productSku || null,
       quantity: Number(i.quantity) || 0,
+      supplierQuantity: Number(i.supplierQuantity) || 0,
+      packSize: Number(i.packSize) || 1,
       unitPrice: Number(i.unitPrice) || 0,
       totalPrice: (Number(i.quantity) || 0) * (Number(i.unitPrice) || 0),
     })));
@@ -122,4 +135,44 @@ async function remove(id, reqUser) {
   return { deleted: true };
 }
 
-module.exports = { list, getById, create, update, approve, remove };
+async function generateAsn(id, body, reqUser) {
+  const po = await PurchaseOrder.findByPk(id, { include: ['PurchaseOrderItems'] });
+  if (!po) throw new Error('Purchase order not found');
+  if (reqUser.role !== 'super_admin' && po.companyId !== reqUser.companyId) throw new Error('Purchase order not found');
+  if (po.status !== 'approved' && po.status !== 'asn_sent') throw new Error('Only approved PO can generate ASN');
+
+  // Logic: Create a pending GoodsReceipt from the PO items
+  const { GoodsReceipt, GoodsReceiptItem } = require('../models');
+  
+  const count = await GoodsReceipt.count({ where: { companyId: po.companyId } });
+  const grNumber = `GRN${String(count + 1).padStart(3, '0')}`;
+  
+  const gr = await GoodsReceipt.create({
+    companyId: po.companyId,
+    purchaseOrderId: po.id,
+    warehouseId: body.warehouseId || po.warehouseId,
+    deliveryType: body.deliveryType || 'carton',
+    eta: body.eta || null,
+    grNumber,
+    status: 'pending',
+    totalExpected: (po.PurchaseOrderItems || []).reduce((s, i) => s + (i.quantity || 0), 0),
+    totalReceived: 0,
+    notes: body.notes || `ASN generated from ${po.poNumber}`,
+  });
+
+  const grItems = (po.PurchaseOrderItems || []).map(i => ({
+    goodsReceiptId: gr.id,
+    productId: i.productId,
+    productName: i.productName,
+    productSku: i.productSku,
+    expectedQty: i.quantity,
+    receivedQty: 0,
+    qtyToBook: i.quantity, // Default qty to book is the expected qty
+  }));
+  if (grItems.length) await GoodsReceiptItem.bulkCreate(grItems);
+
+  await po.update({ status: 'asn_sent' }); // Update status to reflect ASN generated
+  return { success: true, goodsReceiptId: gr.id };
+}
+
+module.exports = { list, getById, create, update, approve, remove, generateAsn };

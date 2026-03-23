@@ -5,6 +5,20 @@ function normalizeRole(role) {
   return (role || '').toString().toLowerCase().replace(/-/g, '_').trim();
 }
 
+/**
+ * Formats location name according to Aisle + Rack + Shelf + Bin without dashes
+ */
+function formatLocationName(data) {
+  const parts = [data.aisle, data.rack, data.shelf, data.bin];
+  const formatted = parts
+    .filter(p => p != null && p !== '')
+    .map(p => p.toString().replace(/-/g, ''))
+    .join('');
+  
+  if (formatted) return formatted;
+  return data.name ? data.name.replace(/-/g, '') : null;
+}
+
 async function list(reqUser, query = {}) {
   const where = {};
   if (query.zoneId) where.zoneId = query.zoneId;
@@ -48,9 +62,12 @@ async function getById(id, reqUser) {
 
 async function create(data, reqUser) {
   if (!data.zoneId) throw new Error('zoneId required');
+  
+  const formattedName = formatLocationName(data);
+  
   return Location.create({
     zoneId: data.zoneId,
-    name: data.name,
+    name: formattedName || data.name,
     code: data.code || null,
     aisle: data.aisle || null,
     rack: data.rack || null,
@@ -66,8 +83,11 @@ async function create(data, reqUser) {
 async function update(id, data, reqUser) {
   const loc = await Location.findByPk(id);
   if (!loc) throw new Error('Location not found');
+
+  const formattedName = formatLocationName(data);
+
   await loc.update({
-    name: data.name ?? loc.name,
+    name: formattedName || data.name || loc.name,
     code: data.code !== undefined ? data.code : loc.code,
     aisle: data.aisle !== undefined ? data.aisle : loc.aisle,
     rack: data.rack !== undefined ? data.rack : loc.rack,
@@ -88,4 +108,88 @@ async function remove(id, reqUser) {
   return { message: 'Location deleted' };
 }
 
-module.exports = { list, getById, create, update, remove };
+async function bulkCreate(locationsData, reqUser) {
+  const results = [];
+  const errors = [];
+  const namesInBatch = new Set(); // Track duplicates within the CSV itself
+  
+  // Use a transaction for bulk insert
+  const transaction = await Location.sequelize.transaction();
+  
+  try {
+    for (const [index, item] of locationsData.entries()) {
+      try {
+        if (!item.zoneId) throw new Error(`Row ${index + 1}: zoneId is required`);
+        
+        const name = formatLocationName(item) || item.name;
+        if (!name) throw new Error(`Row ${index + 1}: Location name could not be generated`);
+
+        // Check for duplicates within the uploaded batch
+        const batchKey = `${item.zoneId}-${name}`;
+        if (namesInBatch.has(batchKey)) {
+          throw new Error(`Row ${index + 1}: Duplicate location name "${name}" in this CSV for zoneId ${item.zoneId}`);
+        }
+        namesInBatch.add(batchKey);
+
+        // Check for duplicates in the database
+        const existingInDb = await Location.findOne({ where: { name, zoneId: item.zoneId } });
+        if (existingInDb) {
+          throw new Error(`Row ${index + 1}: Duplicate location name "${name}" already exists in the database for this zone`);
+        }
+
+        const loc = await Location.create({
+          zoneId: item.zoneId,
+          name: name,
+          code: item.code || null,
+          aisle: item.aisle || null,
+          rack: item.rack || null,
+          shelf: item.shelf || null,
+          bin: item.bin || null,
+          locationType: item.locationType || 'PICK',
+          pickSequence: item.pickSequence != null ? Number(item.pickSequence) : null,
+          maxWeight: item.maxWeight != null ? Number(item.maxWeight) : null,
+          heatSensitive: item.heatSensitive || null,
+        }, { transaction });
+        
+        results.push(loc);
+      } catch (err) {
+        errors.push(err.message);
+      }
+    }
+    
+    if (errors.length > 0) {
+      // If any error exists, we rollback everything or just return errors?
+      // Business logic usually prefers all or nothing for bulk imports to ensure consistency.
+      await transaction.rollback();
+      throw new Error(errors.join('; '));
+    }
+    
+    await transaction.commit();
+    return results;
+  } catch (err) {
+    if (transaction) {
+      try { await transaction.rollback(); } catch (e) { /* already rolled back */ }
+    }
+    throw err;
+  }
+}
+
+
+async function migrateExistingLocations() {
+    const locations = await Location.findAll();
+    for (const loc of locations) {
+        const newName = formatLocationName({
+            aisle: loc.aisle,
+            rack: loc.rack,
+            shelf: loc.shelf,
+            bin: loc.bin,
+            name: loc.name
+        });
+        if (newName && newName !== loc.name) {
+            await loc.update({ name: newName });
+        }
+    }
+}
+
+module.exports = { list, getById, create, update, remove, bulkCreate, migrateExistingLocations };
+
