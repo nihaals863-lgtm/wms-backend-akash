@@ -1,4 +1,4 @@
-const { Report, Product, Warehouse, Location, SalesOrder, Customer, OrderItem } = require('../models');
+const { Report, Product, Warehouse, Location, SalesOrder, Customer, OrderItem, Batch } = require('../models');
 const { Op } = require('sequelize');
 const PDFDocument = require('pdfkit');
 
@@ -60,19 +60,25 @@ async function create(data, reqUser) {
   if (!companyId && reqUser.role !== 'super_admin') throw new Error('companyId required');
 
   const reportType = (data.reportType || data.category || 'INVENTORY').toUpperCase().replace(/\s+/g, '_');
-  const validTypes = ['INVENTORY', 'ORDERS', 'FINANCIAL', 'PERFORMANCE'];
+  const validTypes = ['INVENTORY', 'ORDERS', 'FINANCIAL', 'PERFORMANCE', 'EXPIRY_WARNING'];
   const type = validTypes.includes(reportType) ? reportType : 'INVENTORY';
 
   const startDate = data.startDate ? (data.startDate.split('T')[0] || data.startDate) : null;
   const endDate = data.endDate ? (data.endDate.split('T')[0] || data.endDate) : null;
 
   let content = '';
+  let headers = [];
+  let rows = [];
+  let stocks = null;
+  let orders = null;
+  let sortedStats = null;
+  let expiryBatches = null;
 
   // Generate Content based on Type
   if (type === 'INVENTORY') {
     // Fetch Inventory Data
     const { ProductStock } = require('../models');
-    const stocks = await ProductStock.findAll({
+    stocks = await ProductStock.findAll({
       where: companyId ? { '$Warehouse.companyId$': companyId } : {},
       include: [
         { model: Product, attributes: ['name', 'sku'] },
@@ -81,8 +87,8 @@ async function create(data, reqUser) {
       ]
     });
 
-    const headers = ['Product Name', 'SKU', 'Warehouse', 'Location', 'Quantity', 'Reserved', 'Available', 'Status', 'Last Updated'];
-    const rows = stocks.map(s => {
+    headers = ['Product Name', 'SKU', 'Warehouse', 'Location', 'Quantity', 'Reserved', 'Available', 'Status', 'Last Updated'];
+    rows = stocks.map(s => {
       const prodName = s.Product?.name || '';
       const sku = s.Product?.sku || '';
       const whName = s.Warehouse?.name || '';
@@ -104,7 +110,7 @@ async function create(data, reqUser) {
       where.createdAt[Op.lte] = new Date(endDate + 'T23:59:59.999Z');
     }
 
-    const orders = await SalesOrder.findAll({
+    orders = await SalesOrder.findAll({
       where,
       include: [
         { model: Customer, attributes: ['name', 'email'] },
@@ -112,8 +118,8 @@ async function create(data, reqUser) {
       ]
     });
 
-    const headers = ['Order Number', 'Customer', 'Date', 'Status', 'Total', 'Items'];
-    const rows = orders.map(o => {
+    headers = ['Order Number', 'Customer', 'Date', 'Status', 'Total', 'Items'];
+    rows = orders.map(o => {
       const orderNum = o.orderNumber || '';
       const custName = o.Customer?.name || '';
       const date = o.createdAt ? new Date(o.createdAt).toISOString() : '';
@@ -165,16 +171,59 @@ async function create(data, reqUser) {
       productStats[pid].revenue += (Number(item.subtotal) || 0);
     });
 
-    const sortedStats = Object.values(productStats).sort((a, b) => b.qty - a.qty).slice(0, 50);
+    sortedStats = Object.values(productStats).sort((a, b) => b.qty - a.qty).slice(0, 50);
 
-    const headers = ['Rank', 'Product Name', 'SKU', 'Total Quantity Sold', 'Total Revenue'];
-    const rows = sortedStats.map((s, idx) => {
+    headers = ['Rank', 'Product Name', 'SKU', 'Total Quantity Sold', 'Total Revenue'];
+    rows = sortedStats.map((s, idx) => {
       return `${idx + 1},"${s.name}","${s.sku}",${s.qty},${s.revenue.toFixed(2)}`;
     });
     content = [headers.join(','), ...rows].join('\n');
   }
+  else if (type === 'EXPIRY_WARNING') {
+    const batches = await Batch.findAll({
+      where: {
+        expiryDate: { [Op.ne]: null },
+        status: 'ACTIVE',
+        ...(companyId ? { companyId } : {})
+      },
+      include: [
+        { model: Product, attributes: ['name', 'sku', 'bestBeforeDateWarningPeriodDays'] },
+        { model: Warehouse, attributes: ['name'] },
+        { model: Location, attributes: ['name', 'code'] }
+      ]
+    });
 
-  content = rows.join('\n');
+    const now = new Date();
+    expiryBatches = batches.filter(b => {
+      const warningDays = b.Product?.bestBeforeDateWarningPeriodDays || 0;
+      if (warningDays <= 0) return false;
+      
+      const expiryDate = new Date(b.expiryDate);
+      const diffTime = expiryDate.getTime() - now.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      
+      return diffDays <= warningDays;
+    });
+
+    headers = ['Product Name', 'SKU', 'Batch Number', 'Warehouse', 'Location', 'Quantity', 'Expiry Date', 'Days Left'];
+    rows = expiryBatches.map(b => {
+      const prodName = b.Product?.name || '';
+      const sku = b.Product?.sku || '';
+      const batchNum = b.batchNumber || '';
+      const whName = b.Warehouse?.name || '';
+      const locName = b.Location?.name || b.Location?.code || '';
+      const qty = b.quantity || 0;
+      const expiry = b.expiryDate || '';
+      
+      const expiryDate = new Date(b.expiryDate);
+      const diffTime = expiryDate.getTime() - now.getTime();
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      
+      return `"${prodName}","${sku}","${batchNum}","${whName}","${locName}",${qty},"${expiry}",${diffDays}`;
+    });
+    content = [headers.join(','), ...rows].join('\n');
+  }
+
   const headersStr = headers.join(',');
 
   const reportData = {
@@ -191,7 +240,7 @@ async function create(data, reqUser) {
   };
 
   if (reportData.format === 'PDF') {
-    const pdfBuffer = await generatePDFBuffer(reportData.reportName, headers, stocks || orders || sortedStats, type);
+    const pdfBuffer = await generatePDFBuffer(reportData.reportName, headers, stocks || orders || sortedStats || expiryBatches, type);
     reportData.content = pdfBuffer.toString('base64');
   } else {
     reportData.content = [headersStr, ...rows].join('\n');
@@ -298,6 +347,22 @@ async function generatePDFBuffer(title, headers, data, type) {
           item.sku,
           String(item.qty),
           String(item.revenue.toFixed(2))
+        ];
+      } else if (type === 'EXPIRY_WARNING') {
+        const now = new Date();
+        const expiryDate = new Date(item.expiryDate);
+        const diffTime = expiryDate.getTime() - now.getTime();
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        rowValues = [
+          item.Product?.name || '',
+          item.Product?.sku || '',
+          item.batchNumber || '',
+          item.Warehouse?.name || '',
+          item.Location?.name || item.Location?.code || '',
+          String(item.quantity || 0),
+          item.expiryDate || '',
+          String(diffDays)
         ];
       }
 

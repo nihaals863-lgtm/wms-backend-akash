@@ -137,6 +137,8 @@ async function createProduct(data, reqUser) {
     priceLists: data.priceLists && typeof data.priceLists === 'object' ? data.priceLists : null,
     supplierProducts: Array.isArray(data.supplierProducts) ? data.supplierProducts : null,
     alternativeSkus: Array.isArray(data.alternativeSkus) ? data.alternativeSkus : null,
+    packSize: data.packSize != null ? Number(data.packSize) : 1,
+    bestBeforeDateWarningPeriodDays: data.bestBeforeDateWarningPeriodDays != null ? Number(data.bestBeforeDateWarningPeriodDays) : 0,
   };
   console.log('[DEBUG_SERVICE] Creating Product Payload:', JSON.stringify(payload, null, 2));
   const created = await Product.create(payload);
@@ -198,11 +200,13 @@ async function bulkCreateProducts(productsArray, reqUser) {
         reorderQty: data.reorderQty != null ? Number(data.reorderQty) : null,
         maxStock: data.maxStock != null ? Number(data.maxStock) : null,
         status: data.status && String(data.status).toUpperCase() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
-        images: null,
+        images: Array.isArray(data.images) ? data.images : null,
         cartons: Array.isArray(data.cartons) && data.cartons.length > 0 ? data.cartons : null,
-        priceLists: null,
-        supplierProducts: null,
-        alternativeSkus: null,
+        priceLists: data.priceLists && typeof data.priceLists === 'object' ? data.priceLists : null,
+        supplierProducts: Array.isArray(data.supplierProducts) ? data.supplierProducts : null,
+        alternativeSkus: Array.isArray(data.alternativeSkus) ? data.alternativeSkus : null,
+        packSize: data.packSize != null ? Number(data.packSize) : 1,
+        bestBeforeDateWarningPeriodDays: data.bestBeforeDateWarningPeriodDays != null ? Number(data.bestBeforeDateWarningPeriodDays) : 0,
       });
       results.created++;
     } catch (err) {
@@ -256,6 +260,8 @@ async function updateProduct(id, data, reqUser) {
   if (data.priceLists !== undefined) upd.priceLists = data.priceLists && typeof data.priceLists === 'object' ? data.priceLists : product.priceLists;
   if (data.supplierProducts !== undefined) upd.supplierProducts = Array.isArray(data.supplierProducts) ? data.supplierProducts : product.supplierProducts;
   if (data.alternativeSkus !== undefined) upd.alternativeSkus = Array.isArray(data.alternativeSkus) ? data.alternativeSkus : product.alternativeSkus;
+  if (data.packSize !== undefined) upd.packSize = data.packSize != null ? Number(data.packSize) : product.packSize;
+  if (data.bestBeforeDateWarningPeriodDays !== undefined) upd.bestBeforeDateWarningPeriodDays = data.bestBeforeDateWarningPeriodDays != null ? Number(data.bestBeforeDateWarningPeriodDays) : product.bestBeforeDateWarningPeriodDays;
   if (Object.keys(upd).length === 0) return normalizeProductJson(product);
   console.log('[DEBUG_SERVICE] Final Update Object:', JSON.stringify(upd, null, 2));
   await product.update(upd);

@@ -131,7 +131,9 @@ async function start() {
         }
       }
     }
-    // MySQL: skip alter to avoid "Too many keys" error. Manual fix for new columns instead.
+    await sequelize.sync({ alter: dialect === 'sqlite' });
+    
+    // MySQL: manual column fixes if alter is skipped
     if (dialect === 'mysql') {
        const manualCols = [
          { t: 'inventory_adjustments', c: 'batch_id', type: 'INT' },
@@ -158,10 +160,12 @@ async function start() {
          { t: 'products', c: 'supplier_products', type: 'LONGTEXT' },
          { t: 'products', c: 'price_lists', type: 'LONGTEXT' },
          { t: 'products', c: 'cartons', type: 'LONGTEXT' },
+         { t: 'products', c: 'best_before_date_warning_period_days', type: 'INT DEFAULT 0' },
        ];
        for (const col of manualCols) {
          try { 
            await sequelize.query(`ALTER TABLE ${col.t} ADD COLUMN ${col.c} ${col.type} NULL`); 
+           console.log(`[DB] Column ${col.t}.${col.c} added successfully`);
          } catch (err) {
            if (!err.message.includes('Duplicate column')) {
              console.warn(`[DB] Column ${col.t}.${col.c} potentially exists or error: ${err.message.slice(0, 60)}`);
@@ -169,7 +173,6 @@ async function start() {
          }
        }
     }
-    await sequelize.sync({ alter: dialect === 'sqlite' });
     console.log('Database synced. (MySQL Manual fixes applied)');
     if (dialect === 'sqlite') {
       await sequelize.query('PRAGMA foreign_keys = ON');
