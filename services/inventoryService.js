@@ -155,6 +155,29 @@ async function bulkCreateProducts(productsArray, reqUser) {
     throw new Error('No products to import');
   }
   const results = { created: 0, skipped: 0, errors: [] };
+  
+  // Cache categories for this company to reduce DB calls and handle case-insensitive matching
+  const existingCategories = await Category.findAll({ where: { companyId } });
+  const categoryMap = new Map(); // lowercase name -> ID
+  const categoryIdSet = new Set();
+  existingCategories.forEach(c => {
+    categoryMap.set(c.name.toLowerCase().trim(), c.id);
+    categoryIdSet.add(c.id);
+  });
+  console.log(`[BULK_IMPORT] CompanyId=${companyId} Found ${existingCategories.length} existing categories.`);
+
+  // Cache suppliers for this company
+  const existingSuppliers = await Supplier.findAll({ where: { companyId } });
+  const supplierMap = new Map(); // lowercase name -> ID
+  const supplierIdSet = new Set();
+  existingSuppliers.forEach(s => {
+    supplierMap.set(s.name.toLowerCase().trim(), s.id);
+    supplierIdSet.add(s.id);
+  });
+  console.log(`[BULK_IMPORT] CompanyId=${companyId} Found ${existingSuppliers.length} existing suppliers.`);
+
+
+
   for (let i = 0; i < productsArray.length; i++) {
     const data = productsArray[i];
     try {
@@ -169,11 +192,68 @@ async function bulkCreateProducts(productsArray, reqUser) {
         results.errors.push({ row: i + 1, sku: data.sku, message: 'SKU already exists' });
         continue;
       }
+
+      // Resolve categoryId (ID or Name)
+      let resolvedCategoryId = null;
+      const catInput = data.categoryId != null ? String(data.categoryId).trim() : null;
+      if (catInput !== null && catInput !== '') {
+        // If it's a numeric ID that already exists
+        if (!isNaN(catInput) && categoryIdSet.has(Number(catInput))) {
+          resolvedCategoryId = Number(catInput);
+          console.log(`[BULK_IMPORT] Row ${i+1}: Matched numeric ID ${resolvedCategoryId}`);
+        } else {
+          // Treat as Name
+          const lowerName = catInput.toLowerCase();
+          if (categoryMap.has(lowerName)) {
+            resolvedCategoryId = categoryMap.get(lowerName);
+            console.log(`[BULK_IMPORT] Row ${i+1}: Matched category name "${catInput}" to ID ${resolvedCategoryId}`);
+          } else {
+            console.log(`[BULK_IMPORT] Row ${i+1}: Category "${catInput}" NOT found. Creating...`);
+            // Auto-create category
+            const newCat = await Category.create({
+              companyId,
+              name: catInput,
+              code: catInput.replace(/\s/g, '_').toUpperCase().slice(0, 50)
+            });
+            resolvedCategoryId = newCat.id;
+            categoryMap.set(lowerName, resolvedCategoryId);
+            categoryIdSet.add(resolvedCategoryId);
+            console.log(`[BULK_IMPORT] Row ${i+1}: Created new category "${catInput}" with ID ${resolvedCategoryId}`);
+          }
+        }
+      }
+
+
+      // Resolve supplierId (ID or Name)
+      let resolvedSupplierId = null;
+      const supInput = data.supplierId != null ? String(data.supplierId).trim() : null;
+      if (supInput !== null && supInput !== '') {
+        if (!isNaN(supInput) && supplierIdSet.has(Number(supInput))) {
+          resolvedSupplierId = Number(supInput);
+        } else {
+          const lowerSup = supInput.toLowerCase();
+          if (supplierMap.has(lowerSup)) {
+            resolvedSupplierId = supplierMap.get(lowerSup);
+          } else {
+            console.log(`[BULK_IMPORT] Row ${i+1}: Supplier "${supInput}" NOT found. Creating...`);
+            const newSup = await Supplier.create({
+              companyId,
+              name: supInput,
+              code: supInput.replace(/\s/g, '_').toUpperCase().slice(0, 50)
+            });
+            resolvedSupplierId = newSup.id;
+            supplierMap.set(lowerSup, resolvedSupplierId);
+            supplierIdSet.add(resolvedSupplierId);
+          }
+        }
+      }
+
       await Product.create({
         companyId,
-        categoryId: data.categoryId != null ? data.categoryId : null,
-        supplierId: data.supplierId != null ? data.supplierId : null,
+        categoryId: resolvedCategoryId,
+        supplierId: resolvedSupplierId,
         name: String(data.name).trim(),
+
         sku: String(data.sku).trim(),
         barcode: data.barcode ? String(data.barcode).trim() : null,
         description: data.description ? String(data.description).trim() : null,
@@ -215,6 +295,7 @@ async function bulkCreateProducts(productsArray, reqUser) {
     }
   }
   return results;
+
 }
 
 async function updateProduct(id, data, reqUser) {
@@ -546,11 +627,11 @@ async function listAdjustments(reqUser, query = {}) {
     const j = a.toJSON();
     j.items = [{ product: j.Product, quantity: j.quantity }];
     j.createdBy = j.createdByUser;
-    delete j.createdByUser;
-    delete j.Product;
+    // Keep Product and User for frontend history rendering
     return j;
   });
 }
+
 
 async function createAdjustment(data, reqUser) {
   const role = (reqUser.role || '').toString().toLowerCase().replace(/-/g, '_');
@@ -655,6 +736,19 @@ async function createAdjustment(data, reqUser) {
       status: 'ACTIVE',
     });
   }
+
+  // SYNC Inventory Table (Warehouse Level)
+  const { Inventory } = require('../models');
+  const [inv] = await Inventory.findOrCreate({
+    where: { productId: data.productId, warehouseId },
+    defaults: { quantity: 0, reservedQuantity: 0 }
+  });
+  if (type === 'INCREASE') {
+    await inv.increment('quantity', { by: qty });
+  } else {
+    await inv.decrement('quantity', { by: qty });
+  }
+
 
   // Also create a entry in InventoryLog for history
   const { InventoryLog } = require('../models');
@@ -1257,7 +1351,7 @@ async function listInventory(reqUser, query = {}) {
 }
 
 async function listInventoryLogs(reqUser, query = {}) {
-  const { InventoryLog, Product, Location, Customer } = require('../models');
+  const { InventoryLog, Product, Location, Customer, User, Warehouse } = require('../models');
   const where = {};
   if (query.warehouseId) where.warehouseId = query.warehouseId;
   if (query.type) where.type = query.type;
@@ -1266,19 +1360,35 @@ async function listInventoryLogs(reqUser, query = {}) {
   if (query.clientId) where.clientId = query.clientId;
 
   const productWhere = {};
-  if (reqUser.role !== 'super_admin') productWhere.companyId = reqUser.companyId;
+  if (reqUser.role !== 'super_admin' && reqUser.companyId) {
+    productWhere.companyId = reqUser.companyId;
+  }
 
-  return InventoryLog.findAll({
+  const logs = await InventoryLog.findAll({
     where,
     include: [
-      { model: Product, where: productWhere, attributes: ['id', 'name', 'sku'] },
-      { model: Location, required: false, as: 'Location' },
-      { model: Customer, required: false, as: 'Client' },
+      { model: Product, where: productWhere, required: true, attributes: ['id', 'name', 'sku'] },
+      { association: 'Location', required: false, attributes: ['id', 'name', 'code'] },
+      { association: 'Client', required: false, attributes: ['id', 'name'] },
+      { association: 'Warehouse', required: false, attributes: ['id', 'name'] },
+      { association: 'User', required: false, attributes: ['id', 'name', 'email'] },
     ],
     order: [['createdAt', 'DESC']],
-    limit: query.limit ? parseInt(query.limit) : 50
+    limit: query.limit ? parseInt(query.limit) : 100
+  });
+
+  return logs.map(l => {
+    const j = l.get({ plain: true });
+    j.createdBy = j.User;
+    // For legacy logs or transfers, ensure product info is available
+    if (j.Product) {
+      j.product = j.Product; // Backend compatibility
+    }
+    return j;
   });
 }
+
+
 
 async function stockIn(data, reqUser) {
   const { Inventory, InventoryLog } = require('../models');
@@ -1377,6 +1487,26 @@ async function transferStock(data, reqUser) {
     // 3. Update Quantities
     await source.decrement('quantity', { by: qty, transaction: t });
     await dest.increment('quantity', { by: qty, transaction: t });
+
+    // SYNC Inventory Table (Warehouse Level)
+    const { Inventory } = require('../models');
+    
+    // Decrement from source warehouse total
+    const [sourceInv] = await Inventory.findOrCreate({
+        where: { productId, warehouseId: fromWarehouseId },
+        defaults: { quantity: 0, reservedQuantity: 0 },
+        transaction: t
+    });
+    await sourceInv.decrement('quantity', { by: qty, transaction: t });
+
+    // Increment to destination warehouse total
+    const [destInv] = await Inventory.findOrCreate({
+        where: { productId, warehouseId: toWarehouseId },
+        defaults: { quantity: 0, reservedQuantity: 0 },
+        transaction: t
+    });
+    await destInv.increment('quantity', { by: qty, transaction: t });
+
 
     // 4. Create Logs
     const logBase = {

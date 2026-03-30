@@ -214,6 +214,8 @@ Warehouse.hasMany(InventoryLog, { foreignKey: 'warehouseId' });
 InventoryLog.belongsTo(Warehouse, { foreignKey: 'warehouseId' });
 InventoryLog.belongsTo(Location, { foreignKey: 'locationId', as: 'Location' });
 InventoryLog.belongsTo(Customer, { foreignKey: 'clientId', as: 'Client' });
+InventoryLog.belongsTo(User, { foreignKey: 'userId', as: 'User' });
+
 
 // Bundle -> BundleItem
 Bundle.hasMany(BundleItem, { foreignKey: 'bundleId' });
