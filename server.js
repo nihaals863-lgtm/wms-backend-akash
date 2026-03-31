@@ -18,29 +18,17 @@ const cronService = require('./services/cronService');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-const allowedOrigins = [
-  'http://localhost:5173',
-  'https://wmsnew.wenbear.online'
-];
-
 app.use(cors({
   origin: function (origin, callback) {
-    console.log("CORS Origin:", origin);
-
+    // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    } else {
-      return callback(null, false);
-    }
+    // Allow all origins for now to fix user's Railway connection issue
+    callback(null, true);
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
-
-app.options('*', cors());
-
-
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -124,22 +112,26 @@ app.use((err, req, res, next) => {
 
 async function start() {
   try {
-    await sequelize.authenticate();
     const dialect = sequelize.getDialect();
     if (dialect === 'sqlite') {
       const storage = sequelize.config.storage || path.join(__dirname, 'warehouse_wms.sqlite');
       const fullPath = path.isAbsolute(storage) ? storage : path.resolve(process.cwd(), storage);
-      console.log('---');
-      console.log('Database name: warehouse_wms');
-      console.log('SQLite file:', fullPath);
-      console.log('(Data yahi save hoga - IDs 1, 2, 3...)');
+      console.log('--- DB Check ---');
+      console.log('Type: SQLite');
+      console.log('File:', fullPath);
       console.log('---');
     } else {
-      console.log('---');
-      console.log('Database name:', sequelize.config.database);
-      console.log('MySQL host:', sequelize.config.host || 'localhost');
+      console.log('--- DB Check ---');
+      console.log('Type:', dialect.toUpperCase());
+      console.log('Host:', sequelize.config.host || 'localhost');
+      console.log('Port:', sequelize.config.port || (dialect === 'mysql' ? 3306 : 'default'));
+      console.log('User:', sequelize.config.username);
+      console.log('DB:', sequelize.config.database);
       console.log('---');
     }
+
+    await sequelize.authenticate();
+    console.log('Connected to database successfully.');
     // SQLite: allow alter (drop/recreate tables) by disabling FK checks during sync
     if (dialect === 'sqlite') {
       await sequelize.query('PRAGMA foreign_keys = OFF');
@@ -230,11 +222,20 @@ async function start() {
     });
   } catch (err) {
     console.error('Unable to start server:', err);
-    const isConnectionRefused = err?.code === 'ECONNREFUSED' || err?.parent?.code === 'ECONNREFUSED' || err?.name === 'SequelizeConnectionRefusedError';
-    if (isConnectionRefused && (process.env.DB_DIALECT || 'sqlite') === 'mysql') {
-      console.error('\n--- MySQL connection refused ---');
-      console.error('Either: 1) Start MySQL (XAMPP/WAMP/MySQL service), or');
-      console.error('        2) Use SQLite: in .env set DB_DIALECT=sqlite (or remove DB_DIALECT) and restart.\n');
+    
+    const isConnErr = err?.code === 'ECONNREFUSED' || err?.parent?.code === 'ECONNREFUSED' || err?.code === 'ETIMEDOUT' || err?.parent?.code === 'ETIMEDOUT';
+    
+    if (isConnErr && (process.env.DB_DIALECT || 'sqlite') === 'mysql') {
+      console.error('\n--- Database Connection Error ---');
+      console.error('Details:', err.message);
+      console.error('\nHow to fix:');
+      console.log('1. Check if MySQL is running (Locally or on Cloud)');
+      console.log('2. If you are on Railway, make sure you have:');
+      console.log('   - Linked a MySQL service to this backend.');
+      console.log('   - Added "DB_DIALECT=mysql" in Railway Variables.');
+      console.log('   - Check if you need to use MYSQL_URL (Private Networking).');
+      console.log('3. Your current DB host was:', sequelize.config.host || 'localhost');
+      console.log('   (If this says "localhost" on Railway, it will NOT work!)\n');
     }
     process.exit(1);
   }
