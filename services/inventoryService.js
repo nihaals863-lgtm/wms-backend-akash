@@ -1452,17 +1452,37 @@ async function transferStock(data, reqUser) {
   
   return sequelize.transaction(async (t) => {
     // 1. Check Source
-    const source = await ProductStock.findOne({
-      where: { 
-        productId, 
-        warehouseId: fromWarehouseId, 
-        locationId: fromLocationId, 
-        batchNumber: batchNumber || null 
-      },
-      transaction: t
-    });
+    const sourceBaseWhere = {
+      productId,
+      warehouseId: fromWarehouseId,
+      locationId: fromLocationId,
+    };
+    let source = null;
+    if (batchNumber) {
+      source = await ProductStock.findOne({
+        where: { ...sourceBaseWhere, batchNumber },
+        transaction: t,
+      });
+    }
+    if (!source) {
+      source = await ProductStock.findOne({
+        where: sourceBaseWhere,
+        order: [['quantity', 'DESC']],
+        transaction: t,
+      });
+    }
 
-    if (!source || (source.quantity || 0) < qty) {
+    if (!source) {
+      throw new Error('Insufficient stock in source location/warehouse');
+    }
+
+    const sourceRows = await ProductStock.findAll({
+      where: sourceBaseWhere,
+      order: [['quantity', 'DESC']],
+      transaction: t,
+    });
+    const availableTotal = sourceRows.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0);
+    if (availableTotal < qty) {
       throw new Error('Insufficient stock in source location/warehouse');
     }
 
@@ -1472,7 +1492,7 @@ async function transferStock(data, reqUser) {
         productId, 
         warehouseId: toWarehouseId, 
         locationId: toLocationId, 
-        batchNumber: batchNumber || null 
+        batchNumber: batchNumber || source.batchNumber || null 
       },
       defaults: { 
         quantity: 0, 
@@ -1484,8 +1504,16 @@ async function transferStock(data, reqUser) {
       transaction: t
     });
 
-    // 3. Update Quantities
-    await source.decrement('quantity', { by: qty, transaction: t });
+    // 3. Update Quantities (supports stock split across multiple batch rows)
+    let remaining = qty;
+    for (const row of sourceRows) {
+      if (remaining <= 0) break;
+      const rowQty = Number(row.quantity) || 0;
+      if (rowQty <= 0) continue;
+      const consume = Math.min(rowQty, remaining);
+      await row.decrement('quantity', { by: consume, transaction: t });
+      remaining -= consume;
+    }
     await dest.increment('quantity', { by: qty, transaction: t });
 
     // SYNC Inventory Table (Warehouse Level)

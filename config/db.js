@@ -49,3 +49,7 @@ if (process.env.MYSQL_URL || process.env.DATABASE_URL) {
 }
 
 module.exports = { sequelize, Sequelize };
+
+
+
+

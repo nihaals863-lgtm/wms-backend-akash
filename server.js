@@ -18,6 +18,15 @@ const cronService = require('./services/cronService');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+function getBrokenMySqlTableName(err) {
+  const errno = err?.errno ?? err?.original?.errno ?? err?.parent?.errno;
+  const sql = err?.sql || err?.original?.sql || err?.parent?.sql || '';
+  if (errno !== 1932 || !sql) return null;
+
+  const match = sql.match(/SHOW\s+INDEX\s+FROM\s+`?([a-zA-Z0-9_]+)`?/i);
+  return match ? match[1] : null;
+}
+
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl)
@@ -146,7 +155,38 @@ async function start() {
         }
       }
     }
-    await sequelize.sync({ alter: dialect === 'sqlite' });
+    const syncOptions = { alter: dialect === 'sqlite' };
+    if (dialect === 'mysql') {
+      let syncDone = false;
+      for (let attempt = 1; attempt <= 3 && !syncDone; attempt += 1) {
+        try {
+          await sequelize.sync(syncOptions);
+          syncDone = true;
+        } catch (syncErr) {
+          const brokenTable = getBrokenMySqlTableName(syncErr);
+          if (!brokenTable || attempt === 3) {
+            throw syncErr;
+          }
+
+          console.warn(`[DB] Corrupted table metadata detected for "${brokenTable}". Attempting to drop and recreate.`);
+          try {
+            await sequelize.query('SET FOREIGN_KEY_CHECKS = 0');
+            await sequelize.query(`DROP TABLE IF EXISTS \`${brokenTable}\``);
+            await sequelize.query('SET FOREIGN_KEY_CHECKS = 1');
+            console.log(`[DB] Dropped broken table "${brokenTable}". Retrying sync (${attempt + 1}/3)...`);
+          } catch (dropErr) {
+            try {
+              await sequelize.query('SET FOREIGN_KEY_CHECKS = 1');
+            } catch (_) {
+              // ignore cleanup errors
+            }
+            throw dropErr;
+          }
+        }
+      }
+    } else {
+      await sequelize.sync(syncOptions);
+    }
     
     // MySQL: manual column fixes if alter is skipped
     if (dialect === 'mysql') {
@@ -176,6 +216,12 @@ async function start() {
          { t: 'products', c: 'price_lists', type: 'LONGTEXT' },
          { t: 'products', c: 'cartons', type: 'LONGTEXT' },
          { t: 'products', c: 'best_before_date_warning_period_days', type: 'INT DEFAULT 0' },
+         { t: 'purchase_orders', c: 'warehouse_id', type: 'INT' },
+         { t: 'purchase_orders', c: 'client_id', type: 'INT' },
+         { t: 'goods_receipts', c: 'warehouse_id', type: 'INT' },
+         { t: 'goods_receipts', c: 'delivery_type', type: 'VARCHAR(255)' },
+         { t: 'goods_receipts', c: 'eta', type: 'DATETIME' },
+         { t: 'goods_receipts', c: 'total_to_book', type: 'INT DEFAULT 0' },
          { t: 'movements', c: 'from_warehouse_id', type: 'INT' },
          { t: 'movements', c: 'to_warehouse_id', type: 'INT' },
          { t: 'movements', c: 'from_location_id', type: 'INT' },

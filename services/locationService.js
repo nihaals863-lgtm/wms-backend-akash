@@ -112,6 +112,21 @@ async function bulkCreate(locationsData, reqUser) {
   const results = [];
   const errors = [];
   const namesInBatch = new Set(); // Track duplicates within the CSV itself
+
+  const getValue = (row, keys = []) => {
+    for (const key of keys) {
+      if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== '') {
+        return String(row[key]).trim();
+      }
+    }
+    return null;
+  };
+
+  const normalizeLocationType = (value) => {
+    if (!value) return 'PICK';
+    const t = String(value).trim().toUpperCase();
+    return ['PICK', 'BULK', 'QUARANTINE', 'STAGING'].includes(t) ? t : 'PICK';
+  };
   
   // Use a transaction for bulk insert
   const transaction = await Location.sequelize.transaction();
@@ -119,36 +134,52 @@ async function bulkCreate(locationsData, reqUser) {
   try {
     for (const [index, item] of locationsData.entries()) {
       try {
-        if (!item.zoneId) throw new Error(`Row ${index + 1}: zoneId is required`);
+        const zoneIdRaw = getValue(item, ['zoneId', 'zoneid', 'zone_id', 'ZoneId', 'Zone ID', 'ZoneID', '\uFEFFzoneId']);
+        const zoneId = zoneIdRaw != null ? Number(zoneIdRaw) : null;
+        if (!zoneId || Number.isNaN(zoneId)) throw new Error(`Row ${index + 1}: zoneId is required`);
+
+        const normalized = {
+          zoneId,
+          name: getValue(item, ['name', 'Name']),
+          code: getValue(item, ['code', 'Code']),
+          aisle: getValue(item, ['aisle', 'Aisle']),
+          rack: getValue(item, ['rack', 'Rack']),
+          shelf: getValue(item, ['shelf', 'Shelf']),
+          bin: getValue(item, ['bin', 'Bin']),
+          locationType: normalizeLocationType(getValue(item, ['locationType', 'location_type', 'Location Type', 'Type'])),
+          pickSequence: getValue(item, ['pickSequence', 'pick_sequence', 'Pick Sequence']),
+          maxWeight: getValue(item, ['maxWeight', 'max_weight', 'Max Weight']),
+          heatSensitive: getValue(item, ['heatSensitive', 'heat_sensitive', 'Heat Sensitive']),
+        };
         
-        const name = formatLocationName(item) || item.name;
+        const name = formatLocationName(normalized) || normalized.name;
         if (!name) throw new Error(`Row ${index + 1}: Location name could not be generated`);
 
         // Check for duplicates within the uploaded batch
-        const batchKey = `${item.zoneId}-${name}`;
+        const batchKey = `${zoneId}-${name}`;
         if (namesInBatch.has(batchKey)) {
-          throw new Error(`Row ${index + 1}: Duplicate location name "${name}" in this CSV for zoneId ${item.zoneId}`);
+          throw new Error(`Row ${index + 1}: Duplicate location name "${name}" in this CSV for zoneId ${zoneId}`);
         }
         namesInBatch.add(batchKey);
 
         // Check for duplicates in the database
-        const existingInDb = await Location.findOne({ where: { name, zoneId: item.zoneId } });
+        const existingInDb = await Location.findOne({ where: { name, zoneId } });
         if (existingInDb) {
           throw new Error(`Row ${index + 1}: Duplicate location name "${name}" already exists in the database for this zone`);
         }
 
         const loc = await Location.create({
-          zoneId: item.zoneId,
+          zoneId,
           name: name,
-          code: item.code || null,
-          aisle: item.aisle || null,
-          rack: item.rack || null,
-          shelf: item.shelf || null,
-          bin: item.bin || null,
-          locationType: item.locationType || 'PICK',
-          pickSequence: item.pickSequence != null ? Number(item.pickSequence) : null,
-          maxWeight: item.maxWeight != null ? Number(item.maxWeight) : null,
-          heatSensitive: item.heatSensitive || null,
+          code: normalized.code || null,
+          aisle: normalized.aisle || null,
+          rack: normalized.rack || null,
+          shelf: normalized.shelf || null,
+          bin: normalized.bin || null,
+          locationType: normalized.locationType,
+          pickSequence: normalized.pickSequence != null ? Number(normalized.pickSequence) : null,
+          maxWeight: normalized.maxWeight != null ? Number(normalized.maxWeight) : null,
+          heatSensitive: normalized.heatSensitive || null,
         }, { transaction });
         
         results.push(loc);
