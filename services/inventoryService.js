@@ -36,6 +36,11 @@ function normalizeProductJson(p) {
   return out;
 }
 
+function isTruthyYes(value) {
+  const normalized = String(value == null ? '' : value).trim().toLowerCase();
+  return normalized === 'yes' || normalized === 'true' || normalized === '1';
+}
+
 async function listProducts(reqUser, query = {}) {
   const where = {};
   if (reqUser.role !== 'super_admin') where.companyId = reqUser.companyId;
@@ -646,6 +651,12 @@ async function createAdjustment(data, reqUser) {
   const product = await Product.findByPk(data.productId);
   if (!product) throw new Error('Product not found');
   if (effectiveCompanyId && product.companyId !== effectiveCompanyId && role !== 'super_admin') throw new Error('Product not found');
+  if (isTruthyYes(product.requireBatchTracking) && !String(data.batchNumber || '').trim()) {
+    throw new Error(`${product.name || 'This product'} requires Batch Number`);
+  }
+  if (isTruthyYes(product.perishable) && !data.bestBeforeDate) {
+    throw new Error(`${product.name || 'This product'} requires Best Before Date`);
+  }
 
   // Auto-detect type from quantity sign if not explicitly provided
   const rawQty = parseInt(data.quantity, 10) || 0;
@@ -1384,6 +1395,15 @@ async function listInventoryLogs(reqUser, query = {}) {
     if (j.Product) {
       j.product = j.Product; // Backend compatibility
     }
+    if (j.type === 'TRANSFER' && j.referenceId) {
+      const m = String(j.referenceId).match(/TRANSFER:\s*(\d+):(\d+)\s*->\s*(\d+):(\d+)/i);
+      if (m) {
+        j.fromWarehouseId = Number(m[1]);
+        j.fromLocationId = Number(m[2]);
+        j.toWarehouseId = Number(m[3]);
+        j.toLocationId = Number(m[4]);
+      }
+    }
     return j;
   });
 }
@@ -1449,6 +1469,16 @@ async function transferStock(data, reqUser) {
   }
 
   const qty = parseInt(quantity);
+  if (!qty || qty <= 0) throw new Error('Quantity must be greater than 0');
+  const product = await Product.findByPk(productId);
+  if (!product) throw new Error('Product not found');
+  if (reqUser.role !== 'super_admin' && product.companyId !== reqUser.companyId) throw new Error('Product not found');
+  if (isTruthyYes(product.requireBatchTracking) && !String(batchNumber || '').trim()) {
+    throw new Error(`${product.name || 'This product'} requires Batch Number`);
+  }
+  if (isTruthyYes(product.perishable) && !bestBeforeDate) {
+    throw new Error(`${product.name || 'This product'} requires Best Before Date`);
+  }
   
   return sequelize.transaction(async (t) => {
     // 1. Check Source
